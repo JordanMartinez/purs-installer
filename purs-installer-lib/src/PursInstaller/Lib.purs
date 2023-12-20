@@ -1,0 +1,547 @@
+module PursInstaller.Lib where
+
+import Prelude
+
+import Control.Monad.Reader (ask)
+import Data.Array as Array
+import Data.Codec.JSON (decode)
+import Data.Codec.JSON as CJ
+import Data.Codec.JSON.Record as CAR
+import Data.Either (Either(..))
+import Data.Foldable (for_, traverse_)
+import Data.Generic.Rep (class Generic)
+import Data.Maybe (Maybe(..))
+import Data.Nullable (toMaybe)
+import Data.Set as Set
+import Data.Show.Generic (genericShow)
+import Data.String as String
+import Data.String.CodeUnits as SCU
+import Data.Version (Version, showVersion)
+import Effect.Aff (Aff, Error, error, forkAff, joinFiber, makeAff, message, nonCanceler, try)
+import Effect.Aff.Class (liftAff)
+import Effect.Class (liftEffect)
+import Effect.Exception (throwException)
+import Effect.Ref as Ref
+import JS.Fetch (fetchWithOptions)
+import JS.Fetch.Request as Request
+import JS.Fetch.Response as Response
+import JSON (parse)
+import Node.Buffer (Buffer)
+import Node.Buffer as Buffer
+import Node.ChildProcess (closeH)
+import Node.ChildProcess as CP
+import Node.ChildProcess.Types (Exit(..), inherit)
+import Node.Encoding (Encoding(..))
+import Node.EventEmitter (on, once, once_)
+import Node.FS.Aff as FSA
+import Node.FS.Perms (permsAll)
+import Node.FS.Stats as Stat
+import Node.FS.Stats as Stats
+import Node.FS.Stream (createReadStream, createWriteStream')
+import Node.FS.Sync as FS
+import Node.Library.Execa (ExecaResult, execa)
+import Node.OS as OS
+import Node.Path (FilePath)
+import Node.Path as Path
+import Node.Platform (Platform(..))
+import Node.Process (platform, platformStr)
+import Node.Process as Process
+import Node.Stream (Readable, Writable)
+import Node.Stream as Stream
+import Promise.Aff (toAffE)
+import PursInstaller.Constants (ReleaseFile, ReleaseFileType(..), cacheKey, defaultCacheDir)
+import PursInstaller.Constants as Constants
+import PursInstaller.Foreign.Cacache (CacheFilePath, CacheKey)
+import PursInstaller.Foreign.Cacache as Cacache
+import PursInstaller.Foreign.Tar (extractPursToDir, extractToDir)
+import PursInstaller.Hash (sha1Hash)
+import PursInstaller.Monad (AppM, die, logDebug, logInfo, logWarn)
+import Record as Record
+import Type.Proxy (Proxy(..))
+import Unsafe.Coerce (unsafeCoerce)
+
+installFromCacheReleaseOrSource :: AppM Unit
+installFromCacheReleaseOrSource = do
+  env <- ask
+  logInfo [ "Detecting architecture..." ]
+  { machine, platform, releaseFile } <- getBuildProfile
+  logDebug
+    [ "Machine: " <> machine
+    , "Platform: " <> platform
+    , "ReleaseFile: " <> releaseFile.fileName
+    ]
+  absBinFile <- resolveName releaseFile.osFileName env.name
+  deleteBinFileIfExist absBinFile
+  let cacheId = Array.intercalate "-" [ showVersion env.version, machine, platform ]
+  cacheDir <- liftEffect defaultCacheDir
+
+  cacheResult <- installFromCache { cacheDir, cacheId, absBinFile }
+  case cacheResult of
+    CacheFailure brokenCacheFound -> do
+      installFromRelease { cacheDir, cacheId, absBinFile, brokenCacheFound, version: env.version, releaseFile }
+    InstalledFromCache -> do
+      logInfo [ "Installed from cache." ]
+      binCheck <- checkBinary absBinFile
+      case binCheck of
+        Just err -> do
+          logWarn 
+            [ "Cached file failed binary check with error: "
+            , message err
+            ]
+          installFromRelease { cacheDir, cacheId, absBinFile, version: env.version, releaseFile, brokenCacheFound: true }
+        Nothing ->
+          logInfo [ "Successfully installed PureScript from cache" ]
+
+getBuildProfile :: AppM { machine :: String, platform :: String, releaseFile :: ReleaseFile }
+getBuildProfile = do
+  machine <- liftEffect OS.machine
+  let
+    x86_64 = machine == "x86_64"
+    aarch64 = machine == "aarch64"
+    arm64 = machine == "arm64"
+  pure $ { machine, platform: platformStr, releaseFile: _ } case Process.platform of
+    Just x -> case x of
+      Darwin
+        | x86_64 -> Constants.macos
+        | arm64 -> Constants.macosArm64
+      Linux
+        | x86_64 -> Constants.linux64
+        | aarch64 -> Constants.linuxArm64
+      Win32
+        | x86_64 -> Constants.win64
+      _ -> Constants.sourceTarGz
+    Nothing -> Constants.sourceTarGz
+
+resolveName 
+  :: String
+  -> Maybe String 
+  -> AppM String
+resolveName pursFile = case _ of
+    Nothing -> do
+      pkgJson <- liftEffect $ FS.exists "package.json"
+      if pkgJson then do
+        eitherJ <- liftAff $ parse <$> FSA.readTextFile UTF8 "package.json"
+        case eitherJ of
+          Left _ -> do
+            logWarn [ "Found a 'package.json' file but could not decode it. Not renaming purs binary file to `purs.bin`" ]
+            pure pursFile
+          Right json -> do
+            case decode (CAR.object { bin: CAR.object { purs: CJ.string } }) json of
+              Right { bin: { purs } } -> do
+                pure purs
+              _ -> do
+                logDebug [ "Found a package.json' file, but '.bin.purs` is not a String" ]
+                pure pursFile
+      else do
+        logDebug [ "No package.json file found." ]
+        pure pursFile
+    Just newName -> do
+      logDebug [ "Using user-provided binary name: " <> newName ]
+      newName' <- liftEffect $ Path.resolve [] newName
+      logInfo [ "Using user-provided binary name (post resolution): " <> newName' ]
+      pure newName'
+
+deleteBinFileIfExist :: FilePath -> AppM Unit
+deleteBinFileIfExist absBinFile = do
+  binFileExists <- liftEffect $ FS.exists absBinFile
+  when binFileExists do
+    stats <- liftAff $ FSA.stat absBinFile
+    when (Stats.isDirectory stats) do
+      die [ "Tried to create a PureScript binary at '" <> absBinFile <> "', but a directory already exists there." ]
+    logDebug [ "Deleting an existing file where where the PureScript binary will be installed: "  <> absBinFile ]
+    liftAff $ FSA.unlink absBinFile
+
+data CacheResult
+  = CacheFailure Boolean
+  | InstalledFromCache
+
+derive instance Eq CacheResult
+derive instance Ord CacheResult
+derive instance Generic CacheResult _
+instance Show CacheResult where 
+  show x = genericShow x
+
+installFromCache 
+  :: { cacheDir :: CacheFilePath
+     , cacheId :: String
+     , absBinFile :: FilePath
+     }
+  -> AppM CacheResult
+installFromCache { cacheDir, cacheId, absBinFile } = do
+  nullableInfo <- liftAff $ toAffE $ Cacache.info @( id :: String, mode :: Int ) cacheDir cacheKey
+  case toMaybe nullableInfo of
+    Just info -> do
+      let 
+        id = info.metadata.id
+        cachePath = info.path
+        binMode = info.metadata.mode
+      logDebug [ "Found cache info: " <> show { id, cachePath, binMode } ]
+      if id /= cacheId then do
+        logWarn [ "Found cache is broken: IDs don't match." ]
+        pure $ CacheFailure true
+      else do
+        logDebug [ "Copying cached file to install location" ]
+        result <- liftAff $ streamCopy { from: cachePath, to: absBinFile, toMode: binMode }
+        case result of
+          Left err -> do
+            logWarn 
+              [ "Found cache but encountered error when restoring it:" 
+              , message err
+              ]
+            pure $ CacheFailure true
+          Right _ -> do
+            logDebug [ "Restored file from cache." ]
+            pure InstalledFromCache
+    Nothing -> do
+      logDebug [ "No cache found." ]
+      pure $ CacheFailure false
+
+streamCopy :: { from :: FilePath, to :: FilePath, toMode :: Int } -> Aff (Either Error Unit)
+streamCopy { from, to, toMode } = do
+  fromStream <- liftEffect $ createReadStream from
+  toStream <- liftEffect $ createWriteStream' to { mode: toMode }
+  streamPipeline fromStream toStream
+
+streamPipeline :: forall w r. Readable w -> Writable r -> Aff (Either Error Unit)
+streamPipeline from to = try $ makeAff \done -> do
+  Stream.pipeline from [] to case _ of
+    Just err -> done $ Left err
+    Nothing -> done $ Right unit
+  pure nonCanceler
+
+installFromRelease
+  :: { brokenCacheFound :: Boolean 
+     , cacheDir :: CacheFilePath
+     , absBinFile :: FilePath
+     , cacheId :: String
+     , version :: Version
+     , releaseFile :: ReleaseFile
+     }
+  -> AppM Unit
+installFromRelease args = do
+  when args.brokenCacheFound do
+    clearCacheEntry args.cacheDir cacheKey
+  verifyCache args.cacheDir
+
+  let args' = Record.delete (Proxy :: Proxy "brokenCacheFound") args
+
+  case args.releaseFile.fileType of
+    BinaryFile -> do
+      installFromReleasedBinary args'
+    SourceFile -> do
+      logWarn [ "There is no released binary for your build profile. We will need to build from source..." ]
+      installFromSource args'
+
+installFromReleasedBinary
+  :: { cacheDir :: CacheFilePath
+     , absBinFile :: FilePath
+     , cacheId :: String
+     , version :: Version
+     , releaseFile :: ReleaseFile
+     }
+  -> AppM Unit
+installFromReleasedBinary { cacheDir, cacheId, version, releaseFile, absBinFile } = do
+  result <- downloadFromSource version releaseFile
+  case result of
+    Left err -> do
+      die 
+        [ "Failure when downloading and verifying release file. Error was:"
+        , message err
+        ]
+    Right pursFile -> do
+      renamePursFile { original: pursFile, final: absBinFile }
+
+      binCheck <- checkBinary absBinFile
+      for_ binCheck (liftEffect <<< throwException)
+
+      cacheBinaryFile cacheDir cacheKey cacheId absBinFile
+
+renamePursFile :: { original :: FilePath, final :: FilePath } -> AppM Unit
+renamePursFile { original, final } = do
+  when (original /= final) do
+    logDebug 
+      [ "Renaming purs file"
+      , "  From: " <> original
+      , "  To:   " <> final
+      ]
+    liftAff $ FSA.rename original final
+  logDebug [ "Purs file located at: " <> final ]
+
+installFromSource
+  :: { cacheDir :: CacheFilePath
+     , absBinFile :: FilePath
+     , cacheId :: String
+     , version :: Version
+     , releaseFile :: ReleaseFile
+     }
+  -> AppM Unit
+installFromSource args = do
+  checkStack
+
+  buildDir <- mkTempDir "node-purescript"
+  
+  let
+    baseDir = Path.dirname args.absBinFile
+    compressedPath = Path.concat [ baseDir, args.releaseFile.fileName ]
+    pursBin = args.releaseFile.osFileName
+    pursFile = Path.concat [ baseDir, pursBin ]
+  errOrMainBuf <- download $ args.releaseFile.downloadUrl args.version
+  case errOrMainBuf of
+    Left errMain -> liftEffect $ throwException errMain
+    Right mainBuf -> do
+      logDebug [ "Writing downloaded content to path: " <> compressedPath ]
+      liftAff $ FSA.writeFile compressedPath mainBuf
+      
+      logDebug [ "Extracting " <> pursBin <> " from .tar.gz file..." ]
+      liftAff $ extractToDir compressedPath buildDir
+      env <- ask
+      let 
+        spawnOptions = (_ { cwd = Just buildDir, stdout = Just inherit, stderr = Just inherit })
+        
+        withDiffUser :: Array String -> Array String
+        withDiffUser spawnArgs
+          | not $ Array.elem "--allow-different-user" spawnArgs
+          , not $ Array.elem "--no-allow-different-user" spawnArgs
+          , Just Win32 <- platform = spawnArgs <> [ "--allow-different-user" ]
+          | otherwise = spawnArgs
+
+        setupArgs = withDiffUser [ "setup" ]
+
+        buildArgs = Set.fromFoldable
+          [ "--dry-run"
+          , "--pedantic"
+          , "--fast"
+          , "--only-snapshot"
+          , "--only-dependencies"
+          , "--only-configure"
+          , "--trace"
+          , "--profile"
+          , "--no-strip"
+          , "--coverage"
+          ]
+        installArgs = 
+          withDiffUser [ "install", "--local-bin-path=" <> baseDir, "--flag=purescript:RELEASE", "--no-run-tests", "--no-run-benchmark" ] 
+            <> Array.filter (flip Set.member buildArgs) env.stackArgs
+
+      logDebug [ "Running 'stack setup'" ]
+      setupResult <- liftAff $ _.getResult =<< execa stackBin setupArgs spawnOptions
+      cleanExitOrDieWith (\msg -> [ "Failure when running 'stack setup'", msg ]) setupResult
+      logDebug [ "Running 'stack install'" ]
+      installResult <- liftAff $ _.getResult =<< execa stackBin installArgs spawnOptions
+      cleanExitOrDieWith (\msg -> [ "Failure when running 'stack install'", msg ]) installResult
+
+      logInfo [ "Successfully compiled PureScript from source" ]
+
+      renamePursFile { original: pursFile, final: args.absBinFile }
+      
+      mbErr <- checkBinary args.absBinFile
+      for_ mbErr (liftEffect <<< throwException)
+
+      cacheBinaryFile args.cacheDir cacheKey args.cacheId args.absBinFile
+
+stackBin :: String
+stackBin
+  | platformStr == "win32" = "stack.exe"
+  | otherwise = "stack"
+
+checkStack :: AppM Unit
+checkStack = do
+  result <- liftAff $ _.getResult =<< execa stackBin [ "--numeric-version" ] identity
+  cleanExitOrDieWith (const [ "Stack must be installed" ]) result
+
+cleanExitOrDieWith :: (String -> Array String) -> ExecaResult -> AppM Unit
+cleanExitOrDieWith toMsg result = do
+  logDebug [ result.escapedCommand ]
+  case result.exit of
+    Normally 0 -> 
+      pure unit
+    _ -> do
+      logDebug [ result.message ]
+      die $ toMsg result.message
+
+mkTempDir :: String -> AppM FilePath
+mkTempDir dirPrefix = do
+  osTmpDir <- liftEffect OS.tmpdir
+  tmpDir <- liftAff $ FSA.mkdtemp $ Path.concat [ osTmpDir, dirPrefix <> "-" ]
+  logDebug [ "Temporarily directory at: " <> tmpDir ]
+  unlessM (liftEffect $ FS.exists tmpDir) do
+    logDebug [ "Making directory because it doesn't exist: " <> tmpDir ]
+    liftAff $ FSA.mkdir' tmpDir { mode: permsAll, recursive: true }
+  pure tmpDir
+
+downloadFromSource
+  :: Version 
+  -> ReleaseFile 
+  -> AppM (Either Error FilePath)
+downloadFromSource version releaseFile = do
+  logInfo $ [ "Getting " <> releaseFile.osFileName <> " (" <> showVersion version <> ")" ]
+  pwd <- liftEffect $ Process.cwd
+  try $ downloadAndUntargz
+    { baseDir: pwd
+    , file: releaseFile
+    , version
+    }
+
+download :: String -> AppM (Either Error Buffer)
+download url = try do
+  logDebug [ "Downloading via url: " <> url ]
+  req <- liftEffect $ Request.unsafeNew url $ unsafeCoerce
+    { redirect: "follow" }
+  resp <- liftAff $ toAffE $ fetchWithOptions req { keepalive: true }
+  abuff <- liftAff $ toAffE $ Response.arrayBuffer resp
+  liftEffect $ Buffer.fromArrayBuffer abuff
+
+checkSha
+  :: { expectedSha :: String
+     , fileName :: String
+     , fileContent :: Buffer
+     }
+  -> AppM Unit
+checkSha { expectedSha, fileName, fileContent } = do
+  result <- liftEffect $ sha1Hash fileContent
+  case result of
+    Left err -> die
+      [ "Error encountered while attempting to hash the downloaded file, " <> fileName <> ":"
+      , message err
+      ]
+    Right actualHash
+      | expectedSha /= actualHash ->
+          die
+            [ "Hashes fail to match for file, " <> fileName
+            , "Expected: " <> expectedSha
+            , "Actual  : " <> actualHash
+            ]
+      | otherwise -> do
+          logDebug [ "Hashes match for file, " <> fileName ]
+
+downloadAndUntargz
+  :: { version :: Version
+     , file :: ReleaseFile
+     , baseDir :: FilePath
+     }
+  -> AppM FilePath
+downloadAndUntargz { version, file, baseDir } = do
+  let
+    tarGzFilePath = Path.concat [ baseDir, file.fileName ]
+    pursBin = file.osFileName
+    pursFile = Path.concat [ baseDir, pursBin ]
+  unlessM (liftEffect $ FS.exists baseDir) do
+    logDebug [ "Making parent dir because it doesn't exist: " <> baseDir ]
+    liftAff $ FSA.mkdir' baseDir { mode: permsAll, recursive: true }
+  whenM (liftEffect $ FS.exists tarGzFilePath) do
+    liftAff $ FSA.unlink tarGzFilePath
+  errOrMainBuf <- download $ file.downloadUrl version
+  case errOrMainBuf of
+    Left errMain -> liftEffect $ throwException errMain
+    Right mainBuf -> do
+      logDebug [ "Writing downloaded content to path: " <> tarGzFilePath ]
+      liftAff $ FSA.writeFile tarGzFilePath mainBuf
+
+      for_ file.shaFile \shaFile -> do
+        logDebug [ "Downloading corresponding sha file: " <> shaFile.fileName ]
+        errOrShaBuf <- download $ shaFile.downloadUrl version
+        case errOrShaBuf of
+          Left errSha -> liftEffect $ throwException errSha
+          Right shaBuf -> do
+            expectedSha <- liftEffect $ map (SCU.takeWhile (\c -> c /= ' ')) $ Buffer.toString UTF8 shaBuf
+            checkSha
+              { expectedSha
+              , fileName: file.fileName
+              , fileContent: mainBuf
+              }
+      logDebug [ "Extracting " <> pursBin <> " from .tar.gz file..." ]
+      liftAff $ extractPursToDir tarGzFilePath baseDir pursBin
+
+      logDebug [ "Deleting .tar.gz file: " <> tarGzFilePath ]
+      liftAff $ FSA.unlink tarGzFilePath
+      pure pursFile
+
+checkBinary 
+  :: FilePath
+  -> AppM (Maybe Error)
+checkBinary pursFile = do
+  let pursVersionCommand = "'" <> pursFile <> " --version'"
+  logInfo [ "Verifying that binary exists and is executable via " <> pursVersionCommand ]
+  sp <- liftEffect $ CP.spawn pursFile [ "--version" ]
+  outputFiber <- liftAff $ forkAff $ try $ makeAff \done -> do
+    listeners <- Ref.new Nothing
+    let 
+      sout = CP.stdout sp
+      rmListeners = Ref.read listeners >>= traverse_ \rm -> rm *> Ref.write Nothing listeners
+    chunks <- Ref.new []
+    rmError <- sout # once Stream.errorH \err -> do
+      rmListeners
+      done $ Left err
+    rmData <- sout # on Stream.dataH \buff -> do
+      Ref.modify_ (flip Array.snoc buff) chunks
+    rmEnd <- sout # once Stream.endH do
+      rmListeners
+      buffs <- Ref.read chunks
+      finalBuf <- Buffer.concat buffs
+      output <- Buffer.toString UTF8 finalBuf
+      done $ Right $ String.trim output
+    flip Ref.write listeners $ Just do
+      rmError
+      rmData
+      rmEnd
+    pure nonCanceler
+  result <- liftAff $ try $ makeAff \done -> do
+    sp # once_ closeH case _ of
+      Normally 0 -> done $ Right unit
+      status -> done $ Left $ error $ "Received a value other than Normally 0: " <> show status
+    pure nonCanceler
+  case result of
+    Left err -> pure $ Just $ error $ Array.intercalate "\n"
+      [ "Binary check failed. Calling " <> pursVersionCommand <> " failed with error:"
+      , message err
+      ]
+    Right _ -> do
+      outputResult <- liftAff $ joinFiber outputFiber
+      case outputResult of
+        Left err -> pure $ Just $ error $ Array.intercalate "\n"
+          [ "Binary check failed. Encountered stream error in child process' stdout:"
+          , message err
+          ]
+        Right outputtedVersion
+          | outputtedVersion == "" -> do
+              pure $ Just $ error $ Array.intercalate "\n"
+                [ "Binary check failed. Calling " <> pursVersionCommand <> " did not produce any output." ]
+          | otherwise -> do
+              logInfo [ "Binary check succeeded." ]
+              logDebug [ "Got version: " <> outputtedVersion ]
+              pure Nothing
+
+cacheBinaryFile :: CacheFilePath -> CacheKey -> String -> FilePath -> AppM Unit
+cacheBinaryFile cacheDir cacheKey cacheId absBinFile = do
+  stats <- liftAff $ FSA.stat absBinFile
+  binStream <- liftEffect $ createReadStream absBinFile
+  cacheStream <- liftEffect $ Cacache.putStream @(id :: String, mode :: Number) cacheDir cacheKey
+    { size: Stat.size stats
+    , metadata:
+        { id: cacheId
+        , mode: Stat.mode stats
+        }
+    }
+  copyResult <- liftAff $ streamPipeline binStream cacheStream
+  case copyResult of
+    Left copyErr -> do
+      logWarn
+        [ "Failed to cache binary. Error was:"
+        , message copyErr
+        ]
+      clearCacheEntry cacheDir cacheKey
+      verifyCache cacheDir
+    Right _ -> do
+      verifyCache cacheDir
+      logInfo [ "Successfully cached binary" ]
+
+
+clearCacheEntry :: CacheFilePath -> CacheKey -> AppM Unit
+clearCacheEntry cachePath cacheKey = do
+  liftAff $ void $ try $ toAffE $ Cacache.rmEntry cachePath cacheKey
+
+verifyCache :: CacheFilePath -> AppM Unit
+verifyCache cachePath = do
+  liftAff $ void $ try $ toAffE $ Cacache.verify cachePath
+
+

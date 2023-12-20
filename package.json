@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "cacache": "^18.0.1",
+    "tar": "^6.2.0"
+  },
+  "devDependencies": {
+    "purescript": "^0.15.13",
+    "purs-backend-es": "^1.4.2",
+    "purs-tidy": "^0.10.0",
+    "spago": "^0.93.19"
+  },
+  "scripts": {
+    "bundle": "spago build && purs-backend-es build --int-tags --main Main"
+  }
+}

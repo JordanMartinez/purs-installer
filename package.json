@@ -10,6 +10,8 @@
     "spago": "^0.93.19"
   },
   "scripts": {
-    "bundle": "spago build && purs-backend-es build --int-tags --main Main"
+    "build": "spago build",
+    "optimize": "purs-backend-es build --int-tags",
+    "bundle": "esbuild --bundle bin/main.js --outfile=bin/index.js --format=cjs --platform=node"
   }
 }

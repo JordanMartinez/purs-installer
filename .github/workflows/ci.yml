@@ -47,11 +47,19 @@ jobs:
 
       - name: Build the project
         run: |
-          npx spago build
+          npm run build
 
-      # - name: Run tests
+      - name: Optimize code
+        run: |
+          npm run optimize
+
+      - name: Bundle code
+        run: |
+          npm run bundle
+
+      # - name: Test code
       #   run: |
-      #     spago test
+      #     npm run test
 
       - name: Check Formatting
         if: runner.os == 'Linux'

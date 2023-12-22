@@ -17,3 +17,10 @@ package:
 
   build:
     pedantic: strict
+
+  test:
+    main: Test.PursInstaller.Main
+    dependencies:
+      - node-execa
+      - node-os
+      - spec

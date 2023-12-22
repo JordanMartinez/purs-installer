@@ -12,6 +12,6 @@
   "scripts": {
     "build": "spago build",
     "optimize": "purs-backend-es build --int-tags",
-    "bundle": "esbuild --bundle bin/main.js --outfile=bin/index.js --format=cjs --platform=node"
+    "bundle": "esbuild --bundle bin/main.js --outfile=bin/index.js --platform=node"
   }
 }

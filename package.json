@@ -4,6 +4,7 @@
     "tar": "^6.2.0"
   },
   "devDependencies": {
+    "esbuild": "^0.19.10",
     "purescript": "^0.15.13",
     "purs-backend-es": "^1.4.2",
     "purs-tidy": "^0.10.0",

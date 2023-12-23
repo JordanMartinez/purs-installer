@@ -70,7 +70,7 @@ cliArgsParser = ado
     ]
   logLevel <- option (eitherReader parseLogLevel) $ fold
     [ long "log-level"
-    , help "Indicate the level of logging. 'quiet' takes precedence."
+    , help "Indicate the level of logging: 'quiet', 'warn', or 'debug'. The '--quiet' flag takes precedence."
     , value Warn
     , showDefaultWith (const "warn")
     ]

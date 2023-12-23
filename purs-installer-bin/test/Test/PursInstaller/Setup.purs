@@ -26,13 +26,15 @@ import Node.Library.Execa (ExecaResult, execa)
 import Node.OS as OS
 import Node.Path (FilePath, dirname)
 import Node.Path as Path
+import Node.Process (platformStr)
 import Node.Process as Process
 import Test.Spec.Assertions (fail)
 
 type TestDirs =
   { pursInstaller :: Array String -> Aff ExecaResult
-  , fixture :: FilePath -> FilePath
+  , purs :: Array String -> Aff ExecaResult
   , testCwd :: FilePath
+  , checkFixture :: FilePath -> String -> Aff Unit
   }
 
 withTempDir :: (TestDirs -> Aff Unit) -> Aff Unit
@@ -57,10 +59,23 @@ withTempDir = Aff.bracket createTempDir cleanupTempDir
             , cwd = Just temp
             })
 
+      pursBin
+        | platformStr == "win32" = "purs.exe"
+        | otherwise = "purs"
+
+      purs :: Array String -> Aff ExecaResult
+      purs args = 
+        _.getResult =<< execa pursBin args (_ 
+            { stdout = Just pipe
+            , stderr = Just pipe
+            , cwd = Just temp
+            })
+
     pure
       { pursInstaller
-      , fixture
+      , purs
       , testCwd: temp
+      , checkFixture: \path -> checkFixture' temp (fixture path)
       }
 
   cleanupTempDir { testCwd } = do
@@ -122,6 +137,19 @@ check checkers execResult = do
   checkers.stdout stdout
   checkers.stderr stderr
 
+checkFixture' :: FilePath -> FilePath -> String -> Aff Unit
+checkFixture' testCwd fixtureFileExpected actual = do
+  overwriteSpecFile <- liftEffect $ map isJust $ Process.lookupEnv "SPEC_TEST_ACCEPT"
+  if overwriteSpecFile then do
+    Console.log $ "Overwriting fixture at path: " <> fixtureFileExpected
+    let parentDir = dirname fixtureFileExpected
+    unlessM (liftEffect $ FS.exists parentDir) $ FSA.mkdir' parentDir { mode: permsAll, recursive: true }
+    FSA.writeTextFile UTF8 fixtureFileExpected (actual <> "\n")
+  else do
+    expected <- String.trim <$> FSA.readTextFile UTF8 fixtureFileExpected
+    let normalizeTestDir = String.replaceAll (Pattern testCwd) (Replacement "<test directory>")
+    (normalizeTestDir actual) `shouldEqualStr` (normalizeTestDir expected)
+
 checkOutputsStr
   :: { stdoutStr :: Maybe String
      , stderrStr :: Maybe String
@@ -135,34 +163,6 @@ checkOutputsStr checkers =
     , stderr: maybe mempty (\exp act -> act `shouldEqualStr` exp) checkers.stderrStr
     , result: checkers.result
     }
-
-checkOutputs
-  :: { stdoutFile :: Maybe FilePath
-     , stderrFile :: Maybe FilePath
-     , result :: ExecaResult -> Aff Unit
-     }
-  -> ExecaResult
-  -> Aff Unit
-checkOutputs checkers execResult = do
-  let
-    checkOrOverwrite = case _ of
-      Nothing -> mempty
-      Just fixtureFileExpected -> \actual -> do
-        overwriteSpecFile <- liftEffect $ map isJust $ Process.lookupEnv "SPEC_TEST_ACCEPT"
-        if overwriteSpecFile then do
-          Console.log $ "Overwriting fixture at path: " <> fixtureFileExpected
-          let parentDir = dirname fixtureFileExpected
-          unlessM (liftEffect $ FS.exists parentDir) $ FSA.mkdir' parentDir { mode: permsAll, recursive: true }
-          FSA.writeTextFile UTF8 fixtureFileExpected (actual <> "\n")
-        else do
-          expected <- String.trim <$> FSA.readTextFile UTF8 fixtureFileExpected
-          actual `shouldEqualStr` expected
-  check
-    { stdout: checkOrOverwrite checkers.stdoutFile
-    , stderr: checkOrOverwrite checkers.stderrFile
-    , result: checkers.result
-    }
-    execResult
 
 mkTempPath :: forall m. MonadEffect m => String -> m FilePath
 mkTempPath suffix = liftEffect do

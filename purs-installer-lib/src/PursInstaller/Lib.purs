@@ -205,6 +205,7 @@ installFromCache { cacheDir, cacheKey, absBinFile } = do
                       , message err
                       ]
                     revokeCacheEntry cacheDir cacheKey
+                    liftAff $ FSA.unlink absBinFile
                     pure CacheFailure
                   Nothing -> do
                     pure InstalledFromCache

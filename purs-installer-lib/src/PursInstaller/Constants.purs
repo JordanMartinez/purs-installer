@@ -8,7 +8,6 @@ module PursInstaller.Constants
   , macos
   , win64
   , sourceTarGz
-  , cacheKey
   , defaultCacheDir
   ) where
 
@@ -22,7 +21,7 @@ import Data.Version (Version, showVersion)
 import Effect (Effect)
 import Node.Library.EnvPaths (envPathsNow)
 import Node.Process (platformStr)
-import PursInstaller.Foreign.Cacache (CacheFilePath(..), CacheKey(..))
+import PursInstaller.Foreign.Cacache (CacheFilePath(..))
 
 type ShaFile =
   { fileName :: String
@@ -89,9 +88,6 @@ toReleaseUrl file v = "https://github.com/purescript/purescript/releases/downloa
 
 archiveUrl :: Version -> String
 archiveUrl v = "https://github.com/purescript/purescript/archive/refs/tags/v" <> showVersion v <> ".tar.gz"
-
-cacheKey :: CacheKey
-cacheKey = CacheKey "purs-installer:binary"
 
 defaultCacheDir :: Effect CacheFilePath
 defaultCacheDir = (CacheFilePath <<< _.cache) <$> envPathsNow { name: "purs-installer", suffix: Nothing }

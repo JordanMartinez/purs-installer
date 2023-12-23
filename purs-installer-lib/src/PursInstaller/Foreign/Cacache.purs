@@ -22,6 +22,7 @@ import Node.Path (FilePath)
 import Node.Stream (Writable)
 import Prim.Row as Row
 import Promise (Promise)
+import PursInstaller.Hash (SsriString)
 
 newtype CacheKey = CacheKey String
 
@@ -39,9 +40,9 @@ derive instance Generic CacheFilePath _
 derive newtype instance Show CacheFilePath
 derive instance Newtype CacheFilePath _
 
-foreign import getImpl :: EffectFn2 FilePath String (Promise { data :: Buffer })
+foreign import getImpl :: EffectFn2 FilePath String (Promise { data :: Buffer, integrity :: SsriString })
 
-get :: CacheFilePath -> CacheKey -> Effect (Promise { data :: Buffer })
+get :: CacheFilePath -> CacheKey -> Effect (Promise { data :: Buffer, integrity :: SsriString })
 get (CacheFilePath cachePath) (CacheKey key) = runEffectFn2 getImpl cachePath key
 
 foreign import putImpl :: EffectFn3 FilePath String Buffer Unit
@@ -66,7 +67,7 @@ putStream
 putStream (CacheFilePath cachePath) (CacheKey key) options = runEffectFn3 putStreamImpl cachePath key options
 
 type CacheInfo r =
-  { integrity :: String
+  { integrity :: SsriString
   , path :: FilePath
   , time :: Milliseconds
   , metadata :: { | r }

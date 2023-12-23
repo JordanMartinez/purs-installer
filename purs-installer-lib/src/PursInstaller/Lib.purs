@@ -49,20 +49,18 @@ import Node.Process as Process
 import Node.Stream (Readable, Writable)
 import Node.Stream as Stream
 import Promise.Aff (toAffE)
-import PursInstaller.Constants (ReleaseFile, ReleaseFileType(..), cacheKey, defaultCacheDir)
+import PursInstaller.Constants (ReleaseFile, ReleaseFileType(..), defaultCacheDir)
 import PursInstaller.Constants as Constants
-import PursInstaller.Foreign.Cacache (CacheFilePath, CacheKey)
+import PursInstaller.Foreign.Cacache (CacheFilePath, CacheKey(..))
 import PursInstaller.Foreign.Cacache as Cacache
 import PursInstaller.Foreign.Tar (extractPursToDir, extractToDir)
-import PursInstaller.Hash (sha1Hash)
+import PursInstaller.Hash (HashAlgorithm(..), hash, ssriHash)
 import PursInstaller.Monad (AppM, die, logDebug, logInfo, logWarn)
-import Record as Record
-import Type.Proxy (Proxy(..))
 import Unsafe.Coerce (unsafeCoerce)
 
 installFromCacheReleaseOrSource :: AppM Unit
 installFromCacheReleaseOrSource = do
-  env <- ask
+  env@{ version } <- ask
   logInfo [ "Detecting architecture..." ]
   { machine, platform, releaseFile } <- getBuildProfile
   logDebug
@@ -72,25 +70,15 @@ installFromCacheReleaseOrSource = do
     ]
   absBinFile <- resolveName releaseFile.osFileName env.name
   deleteBinFileIfExist absBinFile
-  let cacheId = Array.intercalate "-" [ showVersion env.version, machine, platform ]
   cacheDir <- liftEffect defaultCacheDir
+  let cacheKey = toCacheKey { version, machine, platform }
 
-  cacheResult <- installFromCache { cacheDir, cacheId, absBinFile }
+  cacheResult <- installFromCache { cacheDir, cacheKey, absBinFile }
   case cacheResult of
-    CacheFailure brokenCacheFound -> do
-      installFromRelease { cacheDir, cacheId, absBinFile, brokenCacheFound, version: env.version, releaseFile }
+    CacheFailure -> do
+      installFromRelease { cacheDir, absBinFile, version, cacheKey, releaseFile }
     InstalledFromCache -> do
-      logInfo [ "Installed from cache." ]
-      binCheck <- checkBinary absBinFile
-      case binCheck of
-        Just err -> do
-          logWarn 
-            [ "Cached file failed binary check with error: "
-            , message err
-            ]
-          installFromRelease { cacheDir, cacheId, absBinFile, version: env.version, releaseFile, brokenCacheFound: true }
-        Nothing ->
-          logInfo [ "Successfully installed PureScript from cache" ]
+      logInfo [ "Successfully installed PureScript from cache" ]
 
 getBuildProfile :: AppM { machine :: String, platform :: String, releaseFile :: ReleaseFile }
 getBuildProfile = do
@@ -152,7 +140,7 @@ deleteBinFileIfExist absBinFile = do
     liftAff $ FSA.unlink absBinFile
 
 data CacheResult
-  = CacheFailure Boolean
+  = CacheFailure
   | InstalledFromCache
 
 derive instance Eq CacheResult
@@ -161,40 +149,68 @@ derive instance Generic CacheResult _
 instance Show CacheResult where 
   show x = genericShow x
 
+toCacheKey :: { version :: Version, machine :: String, platform :: String } -> CacheKey
+toCacheKey r = CacheKey $ Array.intercalate "-" [ showVersion r.version, r.platform, r.machine ]
+
 installFromCache 
   :: { cacheDir :: CacheFilePath
-     , cacheId :: String
+     , cacheKey :: CacheKey
      , absBinFile :: FilePath
      }
   -> AppM CacheResult
-installFromCache { cacheDir, cacheId, absBinFile } = do
-  nullableInfo <- liftAff $ toAffE $ Cacache.info @( id :: String, mode :: Int ) cacheDir cacheKey
+installFromCache { cacheDir, cacheKey, absBinFile } = do
+  nullableInfo <- liftAff $ toAffE $ Cacache.info @( mode :: Int ) cacheDir cacheKey
   case toMaybe nullableInfo of
     Just info -> do
       let 
-        id = info.metadata.id
+        originalSsri = info.integrity
         cachePath = info.path
         binMode = info.metadata.mode
-      logDebug [ "Found cache info: " <> show { id, cachePath, binMode } ]
-      if id /= cacheId then do
-        logWarn [ "Found cache is broken: IDs don't match." ]
-        pure $ CacheFailure true
-      else do
-        logDebug [ "Copying cached file to install location" ]
-        result <- liftAff $ streamCopy { from: cachePath, to: absBinFile, toMode: binMode }
-        case result of
-          Left err -> do
-            logWarn 
-              [ "Found cache but encountered error when restoring it:" 
-              , message err
-              ]
-            pure $ CacheFailure true
-          Right _ -> do
-            logDebug [ "Restored file from cache." ]
-            pure InstalledFromCache
+      logDebug [ "Found cache info: " <> show { cachePath, binMode } ]
+      binBuffer <- liftAff $ FSA.readFile cachePath
+      errOrCachedSsri <- liftEffect $ ssriHash Sha512 binBuffer
+      case errOrCachedSsri of
+        Left err -> do
+          logDebug 
+            [ "Encountered error when hashing cached file path:" 
+            , message err
+            ]
+          revokeCacheEntry cacheDir cacheKey
+          pure CacheFailure
+        Right cachedSsri -> do
+          if cachedSsri /= originalSsri then do
+            logWarn [ "Cached file's contents were manipulated: ssri strings don't match." ]
+            revokeCacheEntry cacheDir cacheKey
+            pure CacheFailure
+          else do
+            logInfo [ "Cache's recorded ssri string matches file's ssri string." ]
+            logDebug [ "Copying cached file to install location" ]
+            result <- liftAff $ streamCopy { from: cachePath, to: absBinFile, toMode: binMode }
+            case result of
+              Left err -> do
+                logWarn 
+                  [ "Encountered error when restoring from cache:" 
+                  , message err
+                  ]
+                revokeCacheEntry cacheDir cacheKey
+                pure CacheFailure
+              Right _ -> do
+                logDebug [ "Restored file from cache." ]
+
+                binCheck <- checkBinary absBinFile
+                case binCheck of
+                  Just err -> do
+                    logWarn 
+                      [ "Cached file failed binary check with error: "
+                      , message err
+                      ]
+                    revokeCacheEntry cacheDir cacheKey
+                    pure CacheFailure
+                  Nothing -> do
+                    pure InstalledFromCache
     Nothing -> do
       logDebug [ "No cache found." ]
-      pure $ CacheFailure false
+      pure CacheFailure
 
 streamCopy :: { from :: FilePath, to :: FilePath, toMode :: Int } -> Aff (Either Error Unit)
 streamCopy { from, to, toMode } = do
@@ -210,37 +226,29 @@ streamPipeline from to = try $ makeAff \done -> do
   pure nonCanceler
 
 installFromRelease
-  :: { brokenCacheFound :: Boolean 
-     , cacheDir :: CacheFilePath
+  :: { cacheDir :: CacheFilePath
      , absBinFile :: FilePath
-     , cacheId :: String
      , version :: Version
+     , cacheKey :: CacheKey
      , releaseFile :: ReleaseFile
      }
   -> AppM Unit
-installFromRelease args = do
-  when args.brokenCacheFound do
-    clearCacheEntry args.cacheDir cacheKey
-  verifyCache args.cacheDir
-
-  let args' = Record.delete (Proxy :: Proxy "brokenCacheFound") args
-
-  case args.releaseFile.fileType of
-    BinaryFile -> do
-      installFromReleasedBinary args'
-    SourceFile -> do
-      logWarn [ "There is no released binary for your build profile. We will need to build from source..." ]
-      installFromSource args'
+installFromRelease args = case args.releaseFile.fileType of
+  BinaryFile -> do
+    installFromReleasedBinary args
+  SourceFile -> do
+    logWarn [ "There is no released binary for your build profile. Building from source..." ]
+    installFromSource args
 
 installFromReleasedBinary
   :: { cacheDir :: CacheFilePath
      , absBinFile :: FilePath
-     , cacheId :: String
      , version :: Version
+     , cacheKey :: CacheKey
      , releaseFile :: ReleaseFile
      }
   -> AppM Unit
-installFromReleasedBinary { cacheDir, cacheId, version, releaseFile, absBinFile } = do
+installFromReleasedBinary { cacheDir, version, cacheKey, releaseFile, absBinFile } = do
   result <- downloadFromSource version releaseFile
   case result of
     Left err -> do
@@ -254,7 +262,7 @@ installFromReleasedBinary { cacheDir, cacheId, version, releaseFile, absBinFile 
       binCheck <- checkBinary absBinFile
       for_ binCheck (liftEffect <<< throwException)
 
-      cacheBinaryFile cacheDir cacheKey cacheId absBinFile
+      cacheBinaryFile { cacheDir, absBinFile, cacheKey, version }
 
 renamePursFile :: { original :: FilePath, final :: FilePath } -> AppM Unit
 renamePursFile { original, final } = do
@@ -270,8 +278,8 @@ renamePursFile { original, final } = do
 installFromSource
   :: { cacheDir :: CacheFilePath
      , absBinFile :: FilePath
-     , cacheId :: String
      , version :: Version
+     , cacheKey :: CacheKey
      , releaseFile :: ReleaseFile
      }
   -> AppM Unit
@@ -337,7 +345,12 @@ installFromSource args = do
       mbErr <- checkBinary args.absBinFile
       for_ mbErr (liftEffect <<< throwException)
 
-      cacheBinaryFile args.cacheDir cacheKey args.cacheId args.absBinFile
+      cacheBinaryFile 
+        { cacheDir: args.cacheDir
+        , absBinFile: args.absBinFile
+        , version: args.version
+        , cacheKey: args.cacheKey
+        }
 
 stackBin :: String
 stackBin
@@ -363,7 +376,7 @@ mkTempDir :: String -> AppM FilePath
 mkTempDir dirPrefix = do
   osTmpDir <- liftEffect OS.tmpdir
   tmpDir <- liftAff $ FSA.mkdtemp $ Path.concat [ osTmpDir, dirPrefix <> "-" ]
-  logDebug [ "Temporarily directory at: " <> tmpDir ]
+  logDebug [ "Temp directory located at: " <> tmpDir ]
   unlessM (liftEffect $ FS.exists tmpDir) do
     logDebug [ "Making directory because it doesn't exist: " <> tmpDir ]
     liftAff $ FSA.mkdir' tmpDir { mode: permsAll, recursive: true }
@@ -398,7 +411,7 @@ checkSha
      }
   -> AppM Unit
 checkSha { expectedSha, fileName, fileContent } = do
-  result <- liftEffect $ sha1Hash fileContent
+  result <- liftEffect $ hash Sha1 fileContent
   case result of
     Left err -> die
       [ "Error encountered while attempting to hash the downloaded file, " <> fileName <> ":"
@@ -511,15 +524,21 @@ checkBinary pursFile = do
               logDebug [ "Got version: " <> outputtedVersion ]
               pure Nothing
 
-cacheBinaryFile :: CacheFilePath -> CacheKey -> String -> FilePath -> AppM Unit
-cacheBinaryFile cacheDir cacheKey cacheId absBinFile = do
+cacheBinaryFile ::
+  { cacheDir :: CacheFilePath
+  , version :: Version
+  , cacheKey :: CacheKey
+  , absBinFile :: FilePath
+  }
+   -> AppM Unit
+cacheBinaryFile { cacheDir, absBinFile, version, cacheKey } = do
   stats <- liftAff $ FSA.stat absBinFile
   binStream <- liftEffect $ createReadStream absBinFile
-  cacheStream <- liftEffect $ Cacache.putStream @(id :: String, mode :: Number) cacheDir cacheKey
+  cacheStream <- liftEffect $ Cacache.putStream @(mode :: Number, version :: String) cacheDir cacheKey
     { size: Stat.size stats
     , metadata:
-        { id: cacheId
-        , mode: Stat.mode stats
+        { mode: Stat.mode stats
+        , version: showVersion version
         }
     }
   copyResult <- liftAff $ streamPipeline binStream cacheStream
@@ -535,6 +554,12 @@ cacheBinaryFile cacheDir cacheKey cacheId absBinFile = do
       verifyCache cacheDir
       logInfo [ "Successfully cached binary" ]
 
+
+revokeCacheEntry :: CacheFilePath -> CacheKey -> AppM Unit
+revokeCacheEntry cachePath cacheKey@(CacheKey key) = do
+  logDebug [ "Clearing cache entry for key: " <> key ]
+  clearCacheEntry cachePath cacheKey
+  verifyCache cachePath
 
 clearCacheEntry :: CacheFilePath -> CacheKey -> AppM Unit
 clearCacheEntry cachePath cacheKey = do

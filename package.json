@@ -11,8 +11,9 @@
     "spago": "^0.93.19"
   },
   "scripts": {
-    "build": "spago build",
+    "compile": "spago build",
     "optimize": "purs-backend-es build --int-tags",
-    "bundle": "esbuild --bundle bin/main.js --outfile=bin/index.js --platform=node"
+    "bundle-app": "esbuild --bundle bin/main.js --outfile=bin/index.js --platform=node",
+    "build": "npm run compile && npm run optimize && npm run bundle-app"
   }
 }

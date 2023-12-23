@@ -45,6 +45,9 @@ withTempDir = Aff.bracket createTempDir cleanupTempDir
     temp <- mkTempPath "purs-installer-test-"
     FSA.mkdir' temp { mode: permsAll, recursive: true }
     isDebug <- liftEffect $ map isJust $ Process.lookupEnv "SPEC_TEST_DEBUG"
+    pursBin <- liftEffect $ Path.resolve [ temp ] case platformStr of
+      "win32" -> "purs.exe"
+      _ -> "purs"
     when isDebug do
       log $ "Running test in " <> temp
     let
@@ -58,10 +61,6 @@ withTempDir = Aff.bracket createTempDir cleanupTempDir
             , stderr = Just pipe
             , cwd = Just temp
             })
-
-      pursBin
-        | platformStr == "win32" = "purs.exe"
-        | otherwise = "purs"
 
       purs :: Array String -> Aff ExecaResult
       purs args = 

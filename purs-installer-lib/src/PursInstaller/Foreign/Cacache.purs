@@ -2,11 +2,11 @@ module PursInstaller.Foreign.Cacache
   ( CacheKey(..)
   , CacheFilePath(..)
   , get
-  , put
   , putStream
   , info
   , rmEntry
   , verify
+  , ls
   ) where
 
 import Prelude
@@ -45,11 +45,6 @@ foreign import getImpl :: EffectFn2 FilePath String (Promise { data :: Buffer, i
 get :: CacheFilePath -> CacheKey -> Effect (Promise { data :: Buffer, integrity :: SsriString })
 get (CacheFilePath cachePath) (CacheKey key) = runEffectFn2 getImpl cachePath key
 
-foreign import putImpl :: EffectFn3 FilePath String Buffer Unit
-
-put :: CacheFilePath -> CacheKey -> Buffer -> Effect Unit
-put (CacheFilePath cachePath) (CacheKey key) buffer = runEffectFn3 putImpl cachePath key buffer
-
 foreign import putStreamImpl :: forall r. EffectFn3 FilePath String { | r } (Writable ())
 
 type PutStreamOptions metadata =
@@ -87,3 +82,8 @@ foreign import verifyImpl :: EffectFn1 FilePath (Promise Unit)
 
 verify :: CacheFilePath -> Effect (Promise Unit)
 verify (CacheFilePath cachePath) = runEffectFn1 verifyImpl cachePath
+
+foreign import lsImpl :: EffectFn1 FilePath (Promise String)
+
+ls :: CacheFilePath -> Effect (Promise String)
+ls (CacheFilePath cachePath) = runEffectFn1 lsImpl cachePath

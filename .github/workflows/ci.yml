@@ -47,7 +47,7 @@ jobs:
 
       - name: Build the project
         run: |
-          npm run build
+          npm run compile
 
       - name: Optimize code
         run: |
@@ -57,9 +57,9 @@ jobs:
         run: |
           npm run bundle
 
-      # - name: Test code
-      #   run: |
-      #     npm run test
+      - name: Test code
+        run: |
+          npx spago test -p purs-installer-bin
 
       - name: Check Formatting
         if: runner.os == 'Linux'

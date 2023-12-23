@@ -20,6 +20,7 @@ import Data.Version (Version, showVersion)
 import Effect.Aff (Aff, Error, error, forkAff, joinFiber, makeAff, message, nonCanceler, try)
 import Effect.Aff.Class (liftAff)
 import Effect.Class (liftEffect)
+import Effect.Class.Console as Console
 import Effect.Exception (throwException)
 import Effect.Ref as Ref
 import JS.Fetch (fetchWithOptions)
@@ -54,7 +55,7 @@ import PursInstaller.Constants as Constants
 import PursInstaller.Foreign.Cacache (CacheFilePath, CacheKey(..))
 import PursInstaller.Foreign.Cacache as Cacache
 import PursInstaller.Foreign.Tar (extractPursToDir, extractToDir)
-import PursInstaller.Hash (HashAlgorithm(..), hash, ssriHash)
+import PursInstaller.Hash (HashAlgorithm(..), hash, hashToSsri)
 import PursInstaller.Monad (AppM, die, logDebug, logInfo, logWarn)
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -112,17 +113,17 @@ resolveName pursFile = case _ of
         case eitherJ of
           Left _ -> do
             logWarn [ "Found a 'package.json' file but could not decode it. Not renaming purs binary file to `purs.bin`" ]
-            pure pursFile
+            liftEffect $ Path.resolve [] pursFile
           Right json -> do
             case decode (CAR.object { bin: CAR.object { purs: CJ.string } }) json of
               Right { bin: { purs } } -> do
-                pure purs
+                liftEffect $ Path.resolve [] purs
               _ -> do
                 logDebug [ "Found a package.json' file, but '.bin.purs` is not a String" ]
-                pure pursFile
+                liftEffect $ Path.resolve [] pursFile
       else do
         logDebug [ "No package.json file found." ]
-        pure pursFile
+        liftEffect $ Path.resolve [] pursFile
     Just newName -> do
       logDebug [ "Using user-provided binary name: " <> newName ]
       newName' <- liftEffect $ Path.resolve [] newName
@@ -168,7 +169,7 @@ installFromCache { cacheDir, cacheKey, absBinFile } = do
         binMode = info.metadata.mode
       logDebug [ "Found cache info: " <> show { cachePath, binMode } ]
       binBuffer <- liftAff $ FSA.readFile cachePath
-      errOrCachedSsri <- liftEffect $ ssriHash Sha512 binBuffer
+      errOrCachedSsri <- liftEffect $ hashToSsri Sha512 binBuffer
       case errOrCachedSsri of
         Left err -> do
           logDebug 
@@ -179,7 +180,11 @@ installFromCache { cacheDir, cacheKey, absBinFile } = do
           pure CacheFailure
         Right cachedSsri -> do
           if cachedSsri /= originalSsri then do
-            logWarn [ "Cached file's contents were manipulated: ssri strings don't match." ]
+            logWarn 
+              [ "Cached file's contents were manipulated: ssri strings don't match." 
+              , "Expected: " <> show originalSsri
+              , "Actual:   " <> show cachedSsri
+              ]
             revokeCacheEntry cacheDir cacheKey
             pure CacheFailure
           else do
@@ -438,7 +443,7 @@ downloadAndUntargz { version, file, baseDir } = do
   let
     tarGzFilePath = Path.concat [ baseDir, file.fileName ]
     pursBin = file.osFileName
-    pursFile = Path.concat [ baseDir, pursBin ]
+  pursFile <- liftEffect $ Path.resolve [ baseDir ] pursBin
   unlessM (liftEffect $ FS.exists baseDir) do
     logDebug [ "Making parent dir because it doesn't exist: " <> baseDir ]
     liftAff $ FSA.mkdir' baseDir { mode: permsAll, recursive: true }
@@ -570,4 +575,8 @@ verifyCache :: CacheFilePath -> AppM Unit
 verifyCache cachePath = do
   liftAff $ void $ try $ toAffE $ Cacache.verify cachePath
 
-
+listCache :: Aff Unit
+listCache = do
+  cacheDir <- liftEffect defaultCacheDir
+  output <- liftAff $ toAffE $ Cacache.ls cacheDir
+  Console.log output

@@ -6,17 +6,17 @@ import Control.Alt ((<|>))
 import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Foldable (fold)
-import Data.Maybe (Maybe(..))
+import Data.Maybe (Maybe)
 import Data.Version as Version
 import Effect (Effect)
-import Effect.Aff (Aff, message, runAff_)
+import Effect.Aff (Aff, launchAff_, message, runAff_)
 import Effect.Class.Console (log)
 import Effect.Console as Console
 import Node.Process as Process
-import Options.Applicative (Parser, ParserPrefs(..), customExecParser, defaultPrefs, eitherReader, fullDesc, header, help, helper, info, long, many, metavar, option, progDesc, short, showDefaultWith, strArgument, strOption, switch, value, (<**>))
+import Options.Applicative (Parser, ParserPrefs(..), command, customExecParser, defaultPrefs, eitherReader, fullDesc, header, help, helper, info, long, many, metavar, option, progDesc, short, showDefaultWith, strArgument, strOption, subparser, switch, value, (<**>))
 import Options.Applicative.Types (optional)
 import Parsing (parseErrorMessage)
-import PursInstaller.Lib (installFromCacheReleaseOrSource)
+import PursInstaller.Lib (installFromCacheReleaseOrSource, listCache)
 import PursInstaller.Monad (LogLevel(..), runAppM)
 import Spago.Generated.BuildInfo as BI
 
@@ -31,19 +31,22 @@ main = startApp =<< parseArgs
             }
         )
     )
-    ( info ((versionString <|> cli) <**> helper)
+    ( info ((versionString <|> rest) <**> helper)
         ( fullDesc
             <> progDesc "Installs PureScript"
             <> header "purs-installer - install PureScript from a release or source"
         )
     )
-  versionString = map (const Nothing) $ switch $ fold
+  versionString = map (const Version) $ switch $ fold
     [ long "version"
     , short 'v'
     , help "Print the version"
     ]
 
-  cli = Just <$> cliArgsParser
+  rest = subparser
+    ( command "install" (info (Install <$> installParser) ( progDesc "Install PureScript" ))
+    <> command "list" (info (pure ListCache) ( progDesc "Print the list of cached binaries." ))
+  )
 
 type CliArgs =
   { pursVersion :: String
@@ -52,8 +55,8 @@ type CliArgs =
   , stackArgs :: Array String
   }
 
-cliArgsParser :: Parser CliArgs
-cliArgsParser = ado
+installParser :: Parser CliArgs
+installParser = ado
   pursVersion <- strOption $ fold
     [ long "purs-version"
     , metavar "VERSION"
@@ -91,11 +94,16 @@ cliArgsParser = ado
     "debug" -> Right Debug
     err -> Left err
 
-startApp :: Maybe CliArgs -> Effect Unit
+data Command
+  = Version
+  | Install CliArgs
+  | ListCache
+
+startApp :: Command -> Effect Unit
 startApp = case _ of
-  Nothing ->
+  Version ->
     log BI.packages."purs-installer-bin"
-  Just args ->
+  Install args ->
     case Version.parseVersion args.pursVersion of
       Left err -> do
         Console.error $ "Failed to convert --purs-version arg into a version: " <> parseErrorMessage err
@@ -107,6 +115,8 @@ startApp = case _ of
           , name: args.name
           , stackArgs: args.stackArgs
           }
+  ListCache ->
+    launchAff_ listCache
   where
   runOrReportError :: forall a. Aff a -> Effect Unit
   runOrReportError = runAff_ case _ of

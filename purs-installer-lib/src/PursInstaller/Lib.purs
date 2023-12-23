@@ -8,7 +8,7 @@ import Data.Codec.JSON (decode)
 import Data.Codec.JSON as CJ
 import Data.Codec.JSON.Record as CAR
 import Data.Either (Either(..))
-import Data.Foldable (for_, traverse_)
+import Data.Foldable (for_)
 import Data.Generic.Rep (class Generic)
 import Data.Maybe (Maybe(..))
 import Data.Nullable (toMaybe)
@@ -17,23 +17,19 @@ import Data.Show.Generic (genericShow)
 import Data.String as String
 import Data.String.CodeUnits as SCU
 import Data.Version (Version, showVersion)
-import Effect.Aff (Aff, Error, error, forkAff, joinFiber, makeAff, message, nonCanceler, try)
+import Effect.Aff (Aff, Error, error, makeAff, message, nonCanceler, try)
 import Effect.Aff.Class (liftAff)
 import Effect.Class (liftEffect)
 import Effect.Class.Console as Console
 import Effect.Exception (throwException)
-import Effect.Ref as Ref
 import JS.Fetch (fetchWithOptions)
 import JS.Fetch.Request as Request
 import JS.Fetch.Response as Response
 import JSON (parse)
 import Node.Buffer (Buffer)
 import Node.Buffer as Buffer
-import Node.ChildProcess (closeH)
-import Node.ChildProcess as CP
-import Node.ChildProcess.Types (Exit(..), inherit)
+import Node.ChildProcess.Types (Exit(..), inherit, pipe)
 import Node.Encoding (Encoding(..))
-import Node.EventEmitter (on, once, once_)
 import Node.FS.Aff as FSA
 import Node.FS.Perms (permsAll)
 import Node.FS.Stats as Stat
@@ -74,7 +70,7 @@ installFromCacheReleaseOrSource = do
   cacheDir <- liftEffect defaultCacheDir
   let cacheKey = toCacheKey { version, machine, platform }
 
-  cacheResult <- installFromCache { cacheDir, cacheKey, absBinFile }
+  cacheResult <- installFromCache { cacheDir, cacheKey, version, absBinFile }
   case cacheResult of
     CacheFailure -> do
       installFromRelease { cacheDir, absBinFile, version, cacheKey, releaseFile }
@@ -156,10 +152,11 @@ toCacheKey r = CacheKey $ Array.intercalate "-" [ showVersion r.version, r.platf
 installFromCache 
   :: { cacheDir :: CacheFilePath
      , cacheKey :: CacheKey
+     , version :: Version
      , absBinFile :: FilePath
      }
   -> AppM CacheResult
-installFromCache { cacheDir, cacheKey, absBinFile } = do
+installFromCache { cacheDir, cacheKey, version, absBinFile } = do
   nullableInfo <- liftAff $ toAffE $ Cacache.info @( mode :: Int ) cacheDir cacheKey
   case toMaybe nullableInfo of
     Just info -> do
@@ -202,7 +199,7 @@ installFromCache { cacheDir, cacheKey, absBinFile } = do
               Right _ -> do
                 logDebug [ "Restored file from cache." ]
 
-                binCheck <- checkBinary absBinFile
+                binCheck <- checkBinary version absBinFile
                 case binCheck of
                   Just err -> do
                     logWarn 
@@ -265,7 +262,7 @@ installFromReleasedBinary { cacheDir, version, cacheKey, releaseFile, absBinFile
     Right pursFile -> do
       renamePursFile { original: pursFile, final: absBinFile }
 
-      binCheck <- checkBinary absBinFile
+      binCheck <- checkBinary version absBinFile
       for_ binCheck (liftEffect <<< throwException)
 
       cacheBinaryFile { cacheDir, absBinFile, cacheKey, version }
@@ -348,7 +345,7 @@ installFromSource args = do
 
       renamePursFile { original: pursFile, final: args.absBinFile }
       
-      mbErr <- checkBinary args.absBinFile
+      mbErr <- checkBinary args.version args.absBinFile
       for_ mbErr (liftEffect <<< throwException)
 
       cacheBinaryFile 
@@ -476,59 +473,30 @@ downloadAndUntargz { version, file, baseDir } = do
       pure pursFile
 
 checkBinary 
-  :: FilePath
+  :: Version
+  -> FilePath
   -> AppM (Maybe Error)
-checkBinary pursFile = do
+checkBinary version pursFile = do
   let pursVersionCommand = "'" <> pursFile <> " --version'"
   logInfo [ "Verifying that binary exists and is executable via " <> pursVersionCommand ]
-  sp <- liftEffect $ CP.spawn pursFile [ "--version" ]
-  outputFiber <- liftAff $ forkAff $ try $ makeAff \done -> do
-    listeners <- Ref.new Nothing
-    let 
-      sout = CP.stdout sp
-      rmListeners = Ref.read listeners >>= traverse_ \rm -> rm *> Ref.write Nothing listeners
-    chunks <- Ref.new []
-    rmError <- sout # once Stream.errorH \err -> do
-      rmListeners
-      done $ Left err
-    rmData <- sout # on Stream.dataH \buff -> do
-      Ref.modify_ (flip Array.snoc buff) chunks
-    rmEnd <- sout # once Stream.endH do
-      rmListeners
-      buffs <- Ref.read chunks
-      finalBuf <- Buffer.concat buffs
-      output <- Buffer.toString UTF8 finalBuf
-      done $ Right $ String.trim output
-    flip Ref.write listeners $ Just do
-      rmError
-      rmData
-      rmEnd
-    pure nonCanceler
-  result <- liftAff $ try $ makeAff \done -> do
-    sp # once_ closeH case _ of
-      Normally 0 -> done $ Right unit
-      status -> done $ Left $ error $ "Received a value other than Normally 0: " <> show status
-    pure nonCanceler
-  case result of
-    Left err -> pure $ Just $ error $ Array.intercalate "\n"
-      [ "Binary check failed. Calling " <> pursVersionCommand <> " failed with error:"
-      , message err
-      ]
-    Right _ -> do
-      outputResult <- liftAff $ joinFiber outputFiber
-      case outputResult of
-        Left err -> pure $ Just $ error $ Array.intercalate "\n"
-          [ "Binary check failed. Encountered stream error in child process' stdout:"
-          , message err
-          ]
-        Right outputtedVersion
-          | outputtedVersion == "" -> do
-              pure $ Just $ error $ Array.intercalate "\n"
-                [ "Binary check failed. Calling " <> pursVersionCommand <> " did not produce any output." ]
-          | otherwise -> do
-              logInfo [ "Binary check succeeded." ]
-              logDebug [ "Got version: " <> outputtedVersion ]
-              pure Nothing
+  sp <- liftAff $ _.getResult =<< execa pursFile [ "--version" ] (_ { stdout = Just pipe, stderr = Just pipe })
+  let outputtedVersion = String.trim sp.stdout
+  case sp.exit of
+    Normally 0 
+      | showVersion version == outputtedVersion -> do
+          logInfo [ "Binary check succeeded." ]
+          logDebug [ "Got version: " <> outputtedVersion ]
+          pure Nothing
+      | otherwise -> do
+          pure $ Just $ error $ Array.intercalate "\n"
+              [ "Binary check failed. Calling " <> pursVersionCommand <> " did not produce the expected version." 
+              , "Got version: " <> outputtedVersion
+              ]
+    _ ->
+      pure $ Just $ error $ Array.intercalate "\n"
+        [ "Calling " <> pursVersionCommand <> " failed with error:"
+        , sp.message
+        ]
 
 cacheBinaryFile ::
   { cacheDir :: CacheFilePath

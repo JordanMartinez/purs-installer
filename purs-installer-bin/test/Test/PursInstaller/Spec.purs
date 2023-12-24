@@ -42,3 +42,9 @@ spec = do
         pursInstaller [ "install", "--purs-version", version ] >>= check { stdout: checkStdout, stderr: mempty, result: isSuccess }
         purs [ "--version" ] >>= check { stdout: shouldContain version, stderr: mempty, result: isSuccess }
   
+  let prereleaseVersion = "0.14.1"
+  it ("Prerelease install: " <> prereleaseVersion) \{ pursInstaller, purs, checkFixture } -> do
+    let
+      checkStdout = checkFixture (prereleaseVersion <> platformPrefix <> "-cached-stdout")
+    pursInstaller [ "install", "--purs-version", prereleaseVersion ] >>= check { stdout: checkStdout, stderr: mempty, result: isSuccess }
+    purs [ "--version" ] >>= check { stdout: shouldContain prereleaseVersion, stderr: mempty, result: isSuccess }

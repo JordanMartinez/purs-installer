@@ -45,19 +45,19 @@ jobs:
       - name: Install NPM dependencies
         run: npm install
 
-      - name: Build the project
+      - name: Compile PureScript code
         run: |
           npm run compile
 
-      - name: Optimize code
+      - name: Optimize the PureScript code
         run: |
           npm run optimize
 
-      - name: Bundle code
+      - name: Bundle into an application
         run: |
-          npm run bundle
+          npm run build
 
-      - name: Test code
+      - name: Test the code
         run: |
           npx spago test -p purs-installer-bin
 

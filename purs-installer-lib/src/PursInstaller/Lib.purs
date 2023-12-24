@@ -14,6 +14,7 @@ import Data.Maybe (Maybe(..))
 import Data.Nullable (toMaybe)
 import Data.Set as Set
 import Data.Show.Generic (genericShow)
+import Data.String (Pattern(..))
 import Data.String as String
 import Data.String.CodeUnits as SCU
 import Data.Version (Version, showVersion)
@@ -493,9 +494,12 @@ checkBinary version pursFile = do
               , "Got version: " <> outputtedVersion
               ]
     _ ->
-      pure $ Just $ error $ Array.intercalate "\n"
-        [ "Calling " <> pursVersionCommand <> " failed with error:"
-        , sp.message
+      pure $ Just $ error $ Array.intercalate "\n" $ Array.catMaybes
+        [ Just $ "Calling " <> pursVersionCommand <> " failed with error:"
+        , if String.contains (Pattern "libtinfo.so.5") sp.message then
+            Just "You will need to install `libtinfo5` before this will work."
+          else Nothing
+        , Just $ sp.message
         ]
 
 cacheBinaryFile ::

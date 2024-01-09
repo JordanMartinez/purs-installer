@@ -2,9 +2,7 @@ module Test.PursInstaller.Main where
 
 import Prelude
 
-import Data.Identity (Identity(..))
 import Data.Maybe (Maybe(..))
-import Data.Newtype (un)
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..), launchAff_)
 import Test.PursInstaller.Setup (withTempDir)
@@ -21,6 +19,8 @@ testConfig = defaultConfig
   }
 
 main :: Effect Unit
-main = launchAff_ $ void $ un Identity $ runSpecT testConfig [ consoleReporter ] do
-  around withTempDir do
-    Spec.spec
+main = do
+  runTests <- runSpecT testConfig [ consoleReporter ] do
+    around withTempDir do
+      Spec.spec
+  launchAff_ $ void runTests

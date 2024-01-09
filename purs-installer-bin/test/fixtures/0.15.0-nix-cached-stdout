@@ -1,5 +1,5 @@
 Detecting architecture...
 Cache's recorded ssri string matches file's ssri string.
-Verifying that binary exists and is executable via '/tmp/7368613235362d754f525330702f513550497438596734666b453565465775597551314878785a73482f7479574374594d383d/purs --version'
+Verifying that binary exists and is executable via '<test directory>/purs --version'
 Binary check succeeded.
 Successfully installed PureScript from cache

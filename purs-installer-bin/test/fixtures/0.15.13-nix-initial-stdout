@@ -1,5 +1,5 @@
 Detecting architecture...
 Getting purs (0.15.13)
-Verifying that binary exists and is executable via '/tmp/7368613235362d737765556133453147516f72696d626b6774517a6b2f65386f6552755265784d52447a62375941453858553d/purs --version'
+Verifying that binary exists and is executable via '<test directory>/purs --version'
 Binary check succeeded.
 Successfully cached binary

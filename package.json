@@ -31,7 +31,7 @@
     "purescript": "^0.15.13",
     "purs-backend-es": "^1.4.2",
     "purs-tidy": "^0.10.0",
-    "spago": "^0.93.19"
+    "spago": "^0.93.24"
   },
   "scripts": {
     "compile": "spago build",

@@ -1,0 +1,9 @@
+Detecting architecture...
+Getting purs (0.14.0)
+Verifying that binary exists and is executable via 'purs --version'
+===
+`purs --version` check failed because `libtinfo.so.5` could not be found.
+
+This version of PureScript requires `libtinfo5` before the compiler can be used. Please install `libtinfo5`.
+===
+Successfully cached binary

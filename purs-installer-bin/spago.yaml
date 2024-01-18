@@ -1,0 +1,26 @@
+package:
+  name: purs-installer-bin
+  dependencies:
+    - aff
+    - console
+    - effect
+    - js-fetch
+    - js-promise-aff
+    - node-fs
+    - optparse
+    - prelude
+    - purs-installer-lib
+    - versions
+
+  run:
+    main: PursInstaller.Main
+
+  build:
+    pedantic: strict
+
+  test:
+    main: Test.PursInstaller.Main
+    dependencies:
+      - node-execa
+      - node-os
+      - spec

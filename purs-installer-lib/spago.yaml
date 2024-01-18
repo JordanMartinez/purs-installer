@@ -1,0 +1,23 @@
+package:
+  name: purs-installer-lib
+  dependencies:
+    - aff
+    - argonaut-codecs
+    - argonaut-core
+    - codec-json
+    - console
+    - effect
+    - js-fetch
+    - js-promise-aff
+    - node-child-process
+    - node-env-paths
+    - node-execa
+    - node-fs
+    - node-os
+    - node-path
+    - node-process
+    - prelude
+    - versions
+
+  build:
+    pedantic: strict

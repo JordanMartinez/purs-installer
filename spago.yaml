@@ -1,0 +1,11 @@
+workspace:
+  build_opts:
+    censor_library_warnings: all
+  package_set:
+    registry: 46.0.0
+  extra_packages:
+    node-env-paths: 1.0.0
+    optparse: 
+      git: "https://github.com/purescript-contrib/purescript-optparse.git"
+      ref: "v6.0.0"
+      

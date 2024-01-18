@@ -1,0 +1,19 @@
+{
+  "dependencies": {
+    "cacache": "^18.0.1",
+    "tar": "^6.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.19.10",
+    "purescript": "^0.15.13",
+    "purs-backend-es": "^1.4.2",
+    "purs-tidy": "^0.10.0",
+    "spago": "^0.93.19"
+  },
+  "scripts": {
+    "compile": "spago build",
+    "optimize": "purs-backend-es build --int-tags",
+    "bundle-app": "esbuild --bundle bin/main.js --outfile=bin/index.js --platform=node",
+    "build": "npm run compile && npm run optimize && npm run bundle-app"
+  }
+}

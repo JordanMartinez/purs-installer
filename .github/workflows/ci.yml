@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Run CI on all 3 latest OSes
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macOS-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Cache PureScript dependencies
+        uses: actions/cache@v3
+        with:
+          key: ${{ runner.os }}-spago-${{ hashFiles('**/spago.yaml') }}
+          path: |
+            .spago
+            output
+
+      - name: Set up Node toolchain
+        uses: actions/setup-node@v3
+        with:
+          node-version: "lts/*"
+
+      - name: Cache NPM dependencies
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-node-modules
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+
+      - name: Install NPM dependencies
+        run: npm install
+
+      - name: Compile PureScript code
+        run: |
+          npm run compile
+
+      - name: Optimize the PureScript code
+        run: |
+          npm run optimize
+
+      - name: Bundle into an application
+        run: |
+          npm run bundle-app
+
+      - name: Test the code
+        run: |
+          # Use this line for debugging CI
+          # SPEC_TEST_ACCEPT=1 SPEC_TEST_DEBUG=1 npx spago test -p purs-installer-bin
+          npx spago test -p purs-installer-bin
+
+      - name: Check Formatting
+        if: runner.os == 'Linux'
+        run: |
+          npx purs-tidy check src test

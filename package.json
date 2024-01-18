@@ -1,4 +1,27 @@
 {
+  "name": "purs-installer",
+  "version": "0.1.0",
+  "description": "PureScript installer",
+  "bin": {
+    "purs-installer": "bin/index.js"
+  },
+  "files": [
+    "bin/index.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JordanMartinez/purs-installer.git"
+  },
+  "keywords": [
+    "PureScript",
+    "installer"
+  ],
+  "author": "Jordan Martinez",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/JordanMartinez/purs-installer/issues"
+  },
+  "homepage": "https://github.com/JordanMartinez/purs-installer#readme",
   "dependencies": {
     "cacache": "^18.0.1",
     "tar": "^6.2.0"
@@ -14,6 +37,7 @@
     "compile": "spago build",
     "optimize": "purs-backend-es build --int-tags",
     "bundle-app": "esbuild --bundle bin/main.js --outfile=bin/index.js --platform=node",
-    "build": "npm run compile && npm run optimize && npm run bundle-app"
+    "build": "npm run compile && npm run optimize && npm run bundle-app",
+    "prepublishOnly": "npm run build"
   }
 }

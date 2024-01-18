@@ -1,6 +1,6 @@
 {
   "name": "purs-installer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PureScript installer",
   "bin": {
     "purs-installer": "bin/index.js"
@@ -34,6 +34,7 @@
     "spago": "^0.93.24"
   },
   "scripts": {
+    "version": "sed -i'' -e \"s|version:.*|version: $npm_package_version|g\" purs-installer-bin/spago.yaml",
     "compile": "spago build",
     "optimize": "purs-backend-es build --int-tags",
     "bundle-app": "esbuild --bundle bin/main.js --outfile=bin/index.js --platform=node",
